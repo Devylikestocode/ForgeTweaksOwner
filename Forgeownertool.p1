@@ -1,0 +1,72 @@
+#Requires -Version 5.1
+<#
+  Forge Tweaks - Owner Licensing Tool
+  KEEP PRIVATE. Never ship this file or the owner-data folder to customers.
+  Only the contents of the release\ folder ship with the app.
+
+  Usage:
+    .\ForgeOwnerTool.ps1 -Mode Init                           # one time: create your signing key
+    .\ForgeOwnerTool.ps1 -Mode Keys -Count 6                  # 6 keys per edition (18 total)
+    .\ForgeOwnerTool.ps1 -Mode Keys -Count 1 -Note "John D"   # issue a key to a customer
+    .\ForgeOwnerTool.ps1 -Mode Revoke -Key FT-STD-ABC234
+    .\ForgeOwnerTool.ps1 -Mode Session -MachineId 1A2B-3C4D-5E6F -Hours 3
+    .\ForgeOwnerTool.ps1 -Mode Test                           # self-check using only the public key
+    .\ForgeOwnerTool.ps1 -Mode Backup -Path E:\forge-owner-key.xml
+#>
+param(
+    [ValidateSet('Init','Keys','Revoke','Session','Test','Backup')]
+    [string]$Mode = 'Test',
+    [ValidateRange(1,500)][int]$Count = 6,
+    [string]$Note = 'dev-example',
+    [string]$Key,
+    [string]$MachineId,
+    [string]$Technician = 'Forge Tweaks Support',
+    [string[]]$Permissions = @('tweaks.advanced','services','startup','network','cleanup','restore'),
+    [ValidateRange(1,24)][int]$Hours = 3,
+    [string]$Path
+)
+
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Security
+
+# Works when run as a file; falls back to Documents\ForgeOwnerTool if pasted
+$BaseDir = if ($PSScriptRoot) { $PSScriptRoot }
+           else { Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'ForgeOwnerTool' }
+$OwnerDir   = Join-Path $BaseDir 'owner-data'
+$ReleaseDir = Join-Path $BaseDir 'release'
+$PrivFile   = Join-Path $OwnerDir 'owner-key.dpapi'
+$KeysCsv    = Join-Path $OwnerDir 'issued-keys.csv'
+$PubFile    = Join-Path $ReleaseDir 'owner-public.xml'
+$ListFile   = Join-Path $ReleaseDir 'license-list.json'
+$Alphabet   = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'   # 32 chars, no 0/O/1/I
+$Editions   = @{ STD = 'Standard'; TEC = 'Technician'; DEV = 'Developer' }
+$Utf8       = New-Object Text.UTF8Encoding($false)
+$HashAlg    = [Security.Cryptography.HashAlgorithmName]::SHA256
+$Padding    = [Security.Cryptography.RSASignaturePadding]::Pkcs1
+
+foreach ($d in $OwnerDir, $ReleaseDir) {
+    if (-not (Test-Path $d)) { New-Item -ItemType Directory $d -Force | Out-Null }
+}
+
+function New-RandomBytes([int]$n) {
+    $b = New-Object byte[] $n
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($b) } finally { $rng.Dispose() }
+    ,$b
+}
+
+function New-KeyBody {
+    $bytes = New-RandomBytes 6
+    # 256 divides evenly by 32, so there is no modulo bias
+    -join ($bytes | ForEach-Object { $Alphabet[$_ % 32] })
+}
+
+function Get-KeyHash([string]$k) {
+    $salt = $Utf8.GetBytes('ForgeTweaks.License.v1')
+    $kdf = New-Object Security.Cryptography.Rfc2898DeriveBytes($k.Trim().ToUpperInvariant(), $salt, 100000, $HashAlg)
+    try { [Convert]::ToBase64String($kdf.GetBytes(32)) } finally { $kdf.Dispose() }
+}
+
+function Get-ConfirmCode([string]$sid) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash($Utf8.GetBytes("confirm|$
